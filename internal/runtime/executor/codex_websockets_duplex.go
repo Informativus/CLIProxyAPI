@@ -39,7 +39,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead,
 	input <-chan cliproxyexecutor.WebsocketInput, initial *codexWebsocketPrepared,
 	initialReporter *helps.UsageReporter, headers http.Header, unlock func(),
-) *cliproxyexecutor.StreamResult {
+) (*cliproxyexecutor.StreamResult, error) {
+	bootstrapReads, bootstrapErr := e.bootstrapCodexDuplex(ctx, sess, conn, readCh)
+	if bootstrapErr != nil {
+		e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "bootstrap_overload", bootstrapErr)
+		sess.clearActive(conn, readCh)
+		unlock()
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", bootstrapErr)
+		initialReporter.PublishFailure(ctx, bootstrapErr)
+		return nil, bootstrapErr
+	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	// This first frame was successfully written by ExecuteStream before handoff.
@@ -369,7 +378,14 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		outputItems := make(map[int64][]byte)
 		var outputFallback [][]byte
 		for {
-			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
+			var event codexWebsocketRead
+			if len(bootstrapReads) > 0 {
+				event = bootstrapReads[0]
+				bootstrapReads = bootstrapReads[1:]
+			} else {
+				event.msgType, event.payload, event.err = readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
+			}
+			kind, payload, errRead := event.msgType, event.payload, event.err
 			if errRead != nil {
 				select {
 				case errWrite := <-writeErrors:
@@ -605,5 +621,51 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+// bootstrapCodexDuplex holds the harmless preamble of a new response before
+// exposing it to the downstream websocket. A capacity rejection in that
+// window has no observable response or consumed follow-up, so the conductor
+// can safely select another credential. Any content-bearing or unknown frame
+// ends the window and is processed by the regular duplex loop unchanged.
+func (e *CodexWebsocketsExecutor) bootstrapCodexDuplex(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) ([]codexWebsocketRead, error) {
+	if e == nil || e.cfg == nil || !e.cfg.Codex.StreamBootstrapBuffering {
+		return nil, nil
+	}
+
+	bootstrapCtx := ctx
+	cancel := func() {}
+	if timeout := e.cfg.Codex.StreamBootstrapTimeoutDuration(); timeout > 0 {
+		bootstrapCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	buffered := make([]codexWebsocketRead, 0, 4)
+	bufferedBytes := 0
+	for frames := 1; ; frames++ {
+		kind, payload, errRead := readCodexWebsocketMessage(bootstrapCtx, sess, conn, readCh)
+		if errRead != nil {
+			if ctx.Err() == nil && errors.Is(errRead, context.DeadlineExceeded) {
+				return buffered, nil
+			}
+			return append(buffered, codexWebsocketRead{conn: conn, err: errRead}), nil
+		}
+
+		event := codexWebsocketRead{conn: conn, msgType: kind, payload: payload}
+		if kind != websocket.TextMessage {
+			return append(buffered, event), nil
+		}
+		payload = bytes.TrimSpace(payload)
+		event.payload = payload
+		windowOpen := frames <= codexBootstrapMaxBufferedFrames && bufferedBytes+len(payload) <= codexBootstrapMaxBufferedBytes
+		if _, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok && windowOpen && isCodexOverloadBootstrapFailure(terminalBody) {
+			return nil, newCodexBootstrapOverloadErr(terminalBody)
+		}
+		if !windowOpen || !isCodexBootstrapBufferableEvent(gjson.GetBytes(payload, "type").String(), payload) {
+			return append(buffered, event), nil
+		}
+		bufferedBytes += len(payload)
+		buffered = append(buffered, event)
+	}
 }

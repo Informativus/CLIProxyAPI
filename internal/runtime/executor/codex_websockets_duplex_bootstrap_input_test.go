@@ -19,118 +19,154 @@ import (
 )
 
 func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
-	for _, kind := range []string{"response.steer", "response.create"} {
-		t.Run(kind, func(t *testing.T) {
-			var rejected, succeeded, rejectedFollowups, healthyFollowups atomic.Int32
-			rejectedDone, healthyDone := make(chan struct{}), make(chan struct{})
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				bad := r.Header.Get("Authorization") == "Bearer bad-key"
-				if bad {
-					defer close(rejectedDone)
-				} else {
-					defer close(healthyDone)
-				}
-				c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				defer func() { _ = c.Close() }()
-				_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
-				if _, _, err = c.ReadMessage(); err != nil {
-					t.Error(err)
-					return
-				}
-				if bad {
-					rejected.Add(1)
-					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":401,"error":{"type":"authentication_error","message":"expired credential"}}`)); err != nil {
+	for _, failure := range []struct {
+		name     string
+		preamble []string
+		payload  string
+	}{
+		{
+			name:    "authentication",
+			payload: `{"type":"error","status":401,"error":{"type":"authentication_error","message":"expired credential"}}`,
+		},
+		{
+			name:    "capacity",
+			payload: `{"type":"error","status":502,"headers":{"retry-after":"6"},"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+		},
+		{
+			name:    "capacity_response_failed",
+			payload: `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+		},
+		{
+			name: "capacity_after_created",
+			preamble: []string{
+				`{"type":"response.created","response":{"id":"rejected","output":[]}}`,
+				`{"type":"response.in_progress","response":{"id":"rejected","output":[]}}`,
+			},
+			payload: `{"type":"error","status":502,"headers":{"retry-after":"6"},"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+		},
+	} {
+		for _, kind := range []string{"response.steer", "response.create"} {
+			t.Run(failure.name+"/"+kind, func(t *testing.T) {
+				var rejected, succeeded, rejectedFollowups, healthyFollowups atomic.Int32
+				rejectedDone, healthyDone := make(chan struct{}), make(chan struct{})
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					bad := r.Header.Get("Authorization") == "Bearer bad-key"
+					if bad {
+						defer close(rejectedDone)
+					} else {
+						defer close(healthyDone)
+					}
+					c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+					if err != nil {
 						t.Error(err)
 						return
 					}
-					// Keep this socket open; bootstrap cleanup must close it without forwarding input.
-					for {
-						if _, _, err = c.ReadMessage(); err != nil {
+					defer func() { _ = c.Close() }()
+					_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
+					if _, _, err = c.ReadMessage(); err != nil {
+						t.Error(err)
+						return
+					}
+					if bad {
+						rejected.Add(1)
+						for _, payload := range failure.preamble {
+							if err = c.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+								t.Error(err)
+								return
+							}
+						}
+						if err = c.WriteMessage(websocket.TextMessage, []byte(failure.payload)); err != nil {
+							t.Error(err)
 							return
 						}
-						rejectedFollowups.Add(1)
+						// Keep this socket open; bootstrap cleanup must close it without forwarding input.
+						for {
+							if _, _, err = c.ReadMessage(); err != nil {
+								return
+							}
+							rejectedFollowups.Add(1)
+						}
+					}
+					succeeded.Add(1)
+					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"healthy","output":[]}}`)); err != nil {
+						t.Error(err)
+						return
+					}
+					_, payload, err := c.ReadMessage()
+					if err != nil {
+						t.Errorf("healthy account did not receive queued follow-up: %v", err)
+						return
+					}
+					healthyFollowups.Add(1)
+					if gjson.GetBytes(payload, "type").String() != kind || gjson.GetBytes(payload, "input.0.content.0.text").String() != "PRESERVE_ME" {
+						t.Errorf("follow-up changed: %s", payload)
+					}
+					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"healthy","output":[]}}`)); err != nil {
+						t.Error(err)
+						return
+					}
+					_, _, _ = c.ReadMessage()
+				}))
+				defer upstream.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				input := make(chan core.WebsocketInput, 1)
+				input <- core.WebsocketInput{Payload: []byte(fmt.Sprintf(`{"type":%q,"input":[{"role":"user","content":[{"type":"input_text","text":"PRESERVE_ME"}]}]}`, kind))}
+				ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+				cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: true, StreamBootstrapTimeout: "100ms"}}
+				cfg.Codex.ResponseSteering = true
+				cfg.CodexResponseSteering = true
+				executor := NewCodexWebsocketsExecutor(cfg)
+				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+				manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
+				manager.SetConfig(cfg)
+				manager.SetRetryConfig(3, 30*time.Second, 0)
+				manager.RegisterExecutor(executor)
+				model := "duplex-bootstrap-followup-model"
+				for i, key := range []string{"bad-key", "good-key"} {
+					candidate := &auth.Auth{ID: fmt.Sprintf("%s-%d", t.Name(), i), Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{
+						"api_key": key, "base_url": upstream.URL, "websockets": "true", "priority": fmt.Sprint(4 - i),
+					}}
+					registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: model}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })
+					if _, err := manager.Register(ctx, candidate); err != nil {
+						t.Fatal(err)
 					}
 				}
-				succeeded.Add(1)
-				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"healthy","output":[]}}`)); err != nil {
-					t.Error(err)
-					return
-				}
-				_, payload, err := c.ReadMessage()
+				result, err := manager.ExecuteStream(ctx, []string{"codex"}, core.Request{Model: model, Payload: []byte(fmt.Sprintf(`{"model":%q,"input":[]}`, model))}, core.Options{
+					SourceFormat: translator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: t.Name()},
+				})
 				if err != nil {
-					t.Errorf("healthy account did not receive queued follow-up: %v", err)
-					return
-				}
-				healthyFollowups.Add(1)
-				if gjson.GetBytes(payload, "type").String() != kind || gjson.GetBytes(payload, "input.0.content.0.text").String() != "PRESERVE_ME" {
-					t.Errorf("follow-up changed: %s", payload)
-				}
-				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"healthy","output":[]}}`)); err != nil {
-					t.Error(err)
-					return
-				}
-				_, _, _ = c.ReadMessage()
-			}))
-			defer upstream.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			input := make(chan core.WebsocketInput, 1)
-			input <- core.WebsocketInput{Payload: []byte(fmt.Sprintf(`{"type":%q,"input":[{"role":"user","content":[{"type":"input_text","text":"PRESERVE_ME"}]}]}`, kind))}
-			ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
-			cfg := &config.Config{}
-			cfg.Codex.ResponseSteering = true
-			cfg.CodexResponseSteering = true
-			executor := NewCodexWebsocketsExecutor(cfg)
-			executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
-			manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
-			manager.SetConfig(cfg)
-			manager.SetRetryConfig(3, 30*time.Second, 0)
-			manager.RegisterExecutor(executor)
-			model := "duplex-bootstrap-followup-model"
-			for i, key := range []string{"bad-key", "good-key"} {
-				candidate := &auth.Auth{ID: fmt.Sprintf("%s-%d", t.Name(), i), Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{
-					"api_key": key, "base_url": upstream.URL, "websockets": "true", "priority": fmt.Sprint(4 - i),
-				}}
-				registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: model}})
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })
-				if _, err := manager.Register(ctx, candidate); err != nil {
 					t.Fatal(err)
 				}
-			}
-			result, err := manager.ExecuteStream(ctx, []string{"codex"}, core.Request{Model: model, Payload: []byte(fmt.Sprintf(`{"model":%q,"input":[]}`, model))}, core.Options{
-				SourceFormat: translator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: t.Name()},
+				completed := false
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+						completed = true
+						cancel()
+					}
+					if gjson.GetBytes(chunk.Payload, "response.id").String() == "rejected" {
+						t.Fatalf("rejected bootstrap escaped to downstream: %s", chunk.Payload)
+					}
+				}
+				if !completed {
+					t.Error("healthy account never completed the follow-up")
+				}
+				for _, done := range []chan struct{}{rejectedDone, healthyDone} {
+					select {
+					case <-done:
+					case <-time.After(3 * time.Second):
+						t.Fatal("bootstrap socket cleanup stalled")
+					}
+				}
+				if rejected.Load() != 1 || succeeded.Load() != 1 || rejectedFollowups.Load() != 0 || healthyFollowups.Load() != 1 {
+					t.Fatalf("attempts rejected=%d healthy=%d; follow-ups rejected=%d healthy=%d", rejected.Load(), succeeded.Load(), rejectedFollowups.Load(), healthyFollowups.Load())
+				}
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			completed := false
-			for chunk := range result.Chunks {
-				if chunk.Err != nil {
-					t.Fatal(chunk.Err)
-				}
-				if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
-					completed = true
-					cancel()
-				}
-			}
-			if !completed {
-				t.Error("healthy account never completed the follow-up")
-			}
-			for _, done := range []chan struct{}{rejectedDone, healthyDone} {
-				select {
-				case <-done:
-				case <-time.After(3 * time.Second):
-					t.Fatal("bootstrap socket cleanup stalled")
-				}
-			}
-			if rejected.Load() != 1 || succeeded.Load() != 1 || rejectedFollowups.Load() != 0 || healthyFollowups.Load() != 1 {
-				t.Fatalf("attempts rejected=%d healthy=%d; follow-ups rejected=%d healthy=%d", rejected.Load(), succeeded.Load(), rejectedFollowups.Load(), healthyFollowups.Load())
-			}
-		})
+		}
 	}
 }
 
@@ -159,7 +195,7 @@ func TestCodexDuplexBootstrapCancellationPreservesInput(t *testing.T) {
 	input := make(chan core.WebsocketInput, 1)
 	input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","input":[]}`)}
 	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
-	cfg := &config.Config{}
+	cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: true, StreamBootstrapTimeout: "100ms"}}
 	cfg.Codex.ResponseSteering = true
 	cfg.CodexResponseSteering = true
 	executor := NewCodexWebsocketsExecutor(cfg)
