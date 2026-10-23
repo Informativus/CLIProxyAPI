@@ -31,11 +31,11 @@ jobs:
       - name: Record optional upstream suite failures
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p dist "${RUNNER_TEMP}/cpa-upstream"
-          git archive v8.0.40 | tar -x -C "${RUNNER_TEMP}/cpa-upstream"
-          (cd "${RUNNER_TEMP}/cpa-upstream" && go test -p 2 -timeout 5m ./internal/home ./internal/store) > dist/upstream-optional-tests.log 2>&1
-          result=$?
+          git archive d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683 | tar -x -C "${RUNNER_TEMP}/cpa-upstream"
+          result=0
+          (cd "${RUNNER_TEMP}/cpa-upstream" && go test -p 2 -timeout 5m ./internal/home ./internal/store) > dist/upstream-optional-tests.log 2>&1 || result=$?
           printf 'Upstream v8.0.40 optional Home/Git-store suite exit: %s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
           cat dist/upstream-optional-tests.log
           exit 0
