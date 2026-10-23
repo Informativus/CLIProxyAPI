@@ -91,3 +91,12 @@ Every future upgrade must use this sequence:
 
 This process applies to the main CPA only. The separate `/fd/` instance has its
 own release lifecycle and must not be changed as part of this upgrade.
+
+The upstream contributor-only path restriction and automatic PR retargeting
+apply only to the upstream repository. Copperside releases target this fork's
+`main` through a reviewed PR, including the complete named upstream release.
+The release workflow gates the deployed API, executor, config, translator, and
+SDK paths. The initial full v8.0.40 test run also found failures in optional
+Home heartbeat and Git-store corruption cases; the build artifact records an
+isolated upstream run of those packages for comparison. Those integrations are
+not enabled on the main CPA instance.
