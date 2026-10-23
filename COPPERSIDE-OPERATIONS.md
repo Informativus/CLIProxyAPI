@@ -9,11 +9,14 @@ and the runtime configuration are operational data and are never committed.
 
 ## Current baseline
 
-- Upstream: CLIProxyAPI `v8.0.36`.
+- Upstream: CLIProxyAPI `v8.0.40`
+  (`d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683`).
 - Copperside patch: `854551452e38484f0ca360e927071976337ac7de`
   (`fix(codex): retry duplex bootstrap overloads`).
-- Current runtime build identity: `8.0.36-cpa-bootstrap.1`, built from commit
-  `216b55b1fec03d2f9cb2cb4ba2e8139a5890e4fb`.
+- Release build identity: `8.0.40-cpa-bootstrap.1`. The release PR and build
+  artifact record the exact source commit and binary checksum.
+- Previous runtime, retained for rollback:
+  `local/cpa-main-cli-proxy-api:216b55b1` (`8.0.36-cpa-bootstrap.1`).
 
 The repository uses the upstream MIT-licensed source as its baseline. Local
 commits must remain small, reviewed, and rebaseable onto an upstream release.
@@ -53,6 +56,13 @@ The current live settings complement the code change:
   just returned a transient failure;
 - model fallback is intentionally disabled. A request stays on its chosen
   model.
+- the container has a 1 GiB memory limit and `GOMEMLIMIT=768MiB`, which leaves
+  room for allocations outside the Go heap and prevents the earlier cgroup
+  memory-limit crashes;
+- legacy Responses `reasoning_effort` is mapped to `reasoning.effort`; an
+  explicitly supplied canonical value takes precedence;
+- file logging is enabled with a 20 MiB total limit and three retained error
+  files. Debug and full request logging are disabled.
 
 A `429 Usage credits are required for this model` response is an upstream
 account-credit refusal. It is distinct from a transient capacity rejection and
@@ -60,15 +70,17 @@ is deliberately surfaced to the client.
 
 ## Required release process
 
-There is currently a deployment-drift risk: Dokploy's compose declaration
-references the upstream `v8.0.36` image, while the running container uses a
-locally built image containing the Copperside patch. A routine Dokploy deploy
-can therefore remove the patch.
+Dokploy's raw compose declaration is the deployment source of truth. The
+previous declaration drift was corrected on 2026-10-23: it now retains the
+Copperside image, `pull_policy: never`, the memory limit, and the Go soft memory
+budget. Keep those settings when changing the image for a release.
 
 Every future upgrade must use this sequence:
 
 1. Start from a named upstream tag and rebase or port the Copperside patch.
-2. Build a Copperside-owned immutable image and record its source commit.
+2. Run the existing Go checks and build a CGO-enabled Linux amd64 binary using
+   `.github/workflows/copperside-release.yml`. Build a Copperside-owned
+   immutable image and record its source commit and checksum.
 3. Change Dokploy's declared image to that immutable image. Never replace a
    running container by hand while leaving the declaration unchanged.
 4. Retain the prior image reference and persistent volume for rollback.
@@ -77,5 +89,5 @@ Every future upgrade must use this sequence:
 6. Record the upstream tag, Copperside commit, image digest, deployment time,
    and verification result in the release merge request.
 
-Until the declared image is brought in sync with the running custom image,
-avoid ordinary Dokploy redeploys of CPA.
+This process applies to the main CPA only. The separate `/fd/` instance has its
+own release lifecycle and must not be changed as part of this upgrade.
