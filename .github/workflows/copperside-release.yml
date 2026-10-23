@@ -1,0 +1,61 @@
+name: copperside-release
+
+on:
+  push:
+    branches:
+      - 'release/cpa-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    if: github.repository == 'Informativus/CLIProxyAPI'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 2GiB
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run existing release-path tests
+        run: go test -p 2 -timeout 5m ./internal/runtime/executor/... ./internal/api/... ./internal/config/... ./internal/thinking/... ./internal/translator/... ./sdk/api/... ./sdk/cliproxy/... ./test/...
+      - name: Record optional upstream suite failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist "${RUNNER_TEMP}/cpa-upstream"
+          git archive d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683 | tar -x -C "${RUNNER_TEMP}/cpa-upstream"
+          result=0
+          (cd "${RUNNER_TEMP}/cpa-upstream" && go test -p 2 -timeout 5m ./internal/home ./internal/store) > dist/upstream-optional-tests.log 2>&1 || result=$?
+          printf 'Upstream v8.0.40 optional Home/Git-store suite exit: %s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+          cat dist/upstream-optional-tests.log
+          exit 0
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          go build -p 2 -buildvcs=false \
+            -ldflags="-s -w -X main.Version=8.0.40-cpa-bootstrap.1 -X main.Commit=${GITHUB_SHA} -X main.BuildDate=${build_date}" \
+            -o dist/CLIProxyAPI ./cmd/server
+          printf '%s\n' "${GITHUB_SHA}" > dist/source-commit.txt
+          cp config.example.yaml dist/config.example.yaml
+          (cd dist && sha256sum CLIProxyAPI > checksums.txt)
+          file dist/CLIProxyAPI
+          ldd dist/CLIProxyAPI
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpa-linux-amd64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
