@@ -19,8 +19,8 @@ declaration readback and healthy matching image are required for success.
 Deployment happens outside the CPA process, so the controller can report status
 during restart. A persistent file lock prevents duplicate controllers. Lost
 responses and restarts never trigger an automatic redeployment. An uncertain
-outcome stays `unknown` until the desired image is healthy and Dokploy is done,
-or the previous healthy declaration is confirmed. Investigate an unresolved
+outcome stays `unknown` until the desired image is healthy, the configuration is
+unchanged, and Dokploy is done. Investigate an unresolved
 `unknown` job before manual rollback; never delete the lock or replay POST.
 Backups and prior images are intentionally retained for operator recovery.
 

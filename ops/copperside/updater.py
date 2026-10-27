@@ -33,6 +33,7 @@ JOB_FILE = STATE / "job.json"
 JOB = json.loads(JOB_FILE.read_text()) if JOB_FILE.exists() else {"status": "idle"}
 CACHE = None
 CACHE_AT = 0
+ATTEMPT_AT = 0
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -86,10 +87,13 @@ def version_order(value):
 
 
 def release(refresh=False):
-    global CACHE, CACHE_AT
+    global CACHE, CACHE_AT, ATTEMPT_AT
     with LOCK:
         if CACHE and not refresh and time.monotonic() - CACHE_AT < 300:
             return CACHE
+        if not refresh and time.monotonic() - ATTEMPT_AT < 60:
+            raise ValueError("Release check is temporarily unavailable")
+        ATTEMPT_AT = time.monotonic()
         repo = CONFIG["release_repository"]
         info = request("https://api.github.com/repos/" + repo + "/releases/latest")
         if info.get("draft") or info.get("prerelease"):
@@ -135,11 +139,10 @@ def reconcile():
     current, source = runtime(), declaration()
     declared_image = yaml.safe_load(source["composeFile"])["services"]["cli-proxy-api"]["image"]
     if source["composeStatus"] == "done":
-        if declared_image == JOB.get("image") and healthy(current, JOB.get("image_id")):
+        config_hash = hashlib.sha256(Path("/cpa-data/config.yaml").read_bytes()).hexdigest()
+        if (declared_image == JOB.get("image") and healthy(current, JOB.get("image_id"))
+                and config_hash == JOB.get("config_sha256")):
             save_job(status="succeeded", error=None)
-        elif (declared_image == JOB.get("previous_image")
-              and healthy(current, JOB.get("previous_image_id"))):
-            save_job(status="failed", error="Update did not replace the previous version.")
 
 
 def status(refresh=False):
@@ -214,7 +217,8 @@ def run_update(candidate):
             raise ValueError("Concurrent declaration change")
         if runtime()["Id"] != before["Id"] or Path("/cpa-data/config.yaml").read_bytes() != config:
             raise ValueError("Concurrent runtime change")
-        save_job(previous_image=previous, previous_image_id=before["Image"])
+        save_job(previous_image=previous, previous_image_id=before["Image"],
+                 config_sha256=hashlib.sha256(config).hexdigest())
         stage = "deploying"
         save_job(status=stage)
         mutation_started = True
@@ -229,7 +233,10 @@ def run_update(candidate):
         deadline = time.monotonic() + 240
         while time.monotonic() < deadline:
             time.sleep(3)
-            current, source = runtime(), declaration()
+            try:
+                current, source = runtime(), declaration()
+            except Exception:
+                continue  # Container replacement can briefly make inspection unavailable.
             if source["composeStatus"] == "error":
                 raise ValueError("Dokploy deployment failed")
             if (source["composeStatus"] == "done" and healthy(current, candidate["image_id"])
