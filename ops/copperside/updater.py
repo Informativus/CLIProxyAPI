@@ -270,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
         key = authorization[7:].encode()
         if not 0 < len(key) <= 72:
             return False
-        remote = yaml.safe_load(Path("/cpa-data/config.yaml").read_text())["remote-management"]
+        remote = yaml.safe_load(Path("/cpa-data/config.yaml").read_text())["management"]
         expected = remote.get("secret-key", "").encode()
         if not expected or not remote.get("allow-remote"):
             return False
