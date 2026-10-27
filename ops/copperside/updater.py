@@ -88,7 +88,7 @@ def version_order(value):
 def release(refresh=False):
     global CACHE, CACHE_AT
     with LOCK:
-        if CACHE and not refresh and time.monotonic() - CACHE_AT < 60:
+        if CACHE and not refresh and time.monotonic() - CACHE_AT < 300:
             return CACHE
         repo = CONFIG["release_repository"]
         info = request("https://api.github.com/repos/" + repo + "/releases/latest")
@@ -248,6 +248,10 @@ def run_update(candidate):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
+
     def log_message(self, *_):
         pass  # Do not log credentials, query strings, or request bodies.
 
