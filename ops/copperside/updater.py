@@ -127,6 +127,36 @@ def current_version(current):
     return current["Config"].get("Labels", {}).get("org.opencontainers.image.version", "")
 
 
+def archive_image_ids(archive, candidate):
+    # Classic Docker reports the config digest; the containerd image store
+    # reports the OCI manifest digest. Both must come from the verified archive
+    # and describe the same image configuration, never an arbitrary loaded tag.
+    with tarfile.open(archive, "r:gz") as source:
+        entries = json.load(source.extractfile("manifest.json"))
+        entries = [entry for entry in entries if candidate["image"] in entry.get("RepoTags", [])]
+        if len(entries) != 1:
+            raise ValueError("Archive image tag mismatch")
+        config = source.extractfile(entries[0]["Config"]).read()
+        config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+        identities = {config_id}
+        try:
+            index = json.load(source.extractfile("index.json"))
+        except KeyError:
+            index = {}
+        for descriptor in index.get("manifests", []):
+            digest = descriptor.get("digest", "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError("Invalid archive descriptor digest")
+            data = source.extractfile("blobs/sha256/" + digest[7:]).read()
+            if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError("Archive descriptor checksum mismatch")
+            if json.loads(data).get("config", {}).get("digest") == config_id:
+                identities.add(digest)
+        if candidate["image_id"] not in identities:
+            raise ValueError("Release image identity does not match archive")
+        return identities
+
+
 def healthy(current, image_id):
     return (current["Image"] == image_id and current["State"].get("Running")
             and current["State"].get("Health", {}).get("Status") == "healthy")
@@ -177,13 +207,18 @@ def run_update(candidate):
                 output.write(block)
         if downloaded != candidate["size"] or not hmac.compare_digest(digest.hexdigest(), candidate["sha256"]):
             raise ValueError("Archive checksum mismatch")
+        image_ids = archive_image_ids(archive, candidate)
         docker("load", "-i", str(archive), timeout=180)
         archive.unlink()
         image = json.loads(docker("image", "inspect", candidate["image"]))[0]
-        if (image["Id"] != candidate["image_id"]
+        if (image["Id"] not in image_ids
                 or image["Config"].get("Labels", {}).get("org.opencontainers.image.revision") != candidate["commit"]
                 or current_version(image) != candidate["version"]):
             raise ValueError("Loaded image identity mismatch")
+        # Persist the identity used by this daemon for deployment and restart
+        # reconciliation without mutating the cached release contract.
+        candidate = {**candidate, "image_id": image["Id"]}
+        save_job(image_id=image["Id"])
         stage = "backing_up"
         save_job(status=stage)
         source, before = declaration(), runtime()
