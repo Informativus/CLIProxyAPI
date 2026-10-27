@@ -1,0 +1,8 @@
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata bash && rm -rf /var/lib/apt/lists/*
+WORKDIR /CLIProxyAPI
+COPY dist/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+RUN chmod 755 /CLIProxyAPI/CLIProxyAPI
+LABEL org.opencontainers.image.source="https://github.com/Informativus/CLIProxyAPI"
+EXPOSE 8317
+ENTRYPOINT ["/CLIProxyAPI/CLIProxyAPI"]

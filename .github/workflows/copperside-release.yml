@@ -4,10 +4,16 @@ on:
   push:
     branches:
       - 'release/cpa-*'
+  pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish an installable Copperside release from main
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   linux-amd64:
@@ -33,29 +39,56 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist "${RUNNER_TEMP}/cpa-upstream"
-          git archive d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683 | tar -x -C "${RUNNER_TEMP}/cpa-upstream"
+          git archive 1f917e77c4562623aa49e9804d999524151a2f96 | tar -x -C "${RUNNER_TEMP}/cpa-upstream"
           result=0
           (cd "${RUNNER_TEMP}/cpa-upstream" && go test -p 2 -timeout 5m ./internal/home ./internal/store) > dist/upstream-optional-tests.log 2>&1 || result=$?
-          printf 'Upstream v8.0.40 optional Home/Git-store suite exit: %s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
-          cat dist/upstream-optional-tests.log
+          printf 'Upstream v8.0.44 optional Home/Git-store suite exit: %s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 60 dist/upstream-optional-tests.log
           exit 0
       - name: Build release binary
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
+          version=$(cat ops/copperside/version)
           build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           go build -p 2 -buildvcs=false \
-            -ldflags="-s -w -X main.Version=8.0.40-cpa-bootstrap.1 -X main.Commit=${GITHUB_SHA} -X main.BuildDate=${build_date}" \
+            -ldflags="-s -w -X main.Version=${version} -X main.Commit=${GITHUB_SHA} -X main.BuildDate=${build_date}" \
             -o dist/CLIProxyAPI ./cmd/server
           printf '%s\n' "${GITHUB_SHA}" > dist/source-commit.txt
           cp config.example.yaml dist/config.example.yaml
           (cd dist && sha256sum CLIProxyAPI > checksums.txt)
           file dist/CLIProxyAPI
           ldd dist/CLIProxyAPI
+      - name: Package immutable runtime image
+        run: |
+          set -euo pipefail
+          version=$(cat ops/copperside/version)
+          image="local/cpa-main-cli-proxy-api:${version}-${GITHUB_SHA:0:12}"
+          docker build --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${version}" \
+            -t "$image" -f ops/copperside/Dockerfile.runtime .
+          docker save "$image" | gzip > dist/cpa-image.tar.gz
+          export CPA_IMAGE="$image"
+          export CPA_IMAGE_ID=$(docker image inspect "$image" --format '{{.Id}}')
+          python3 ops/copperside/release_manifest.py
+      - name: Validate updater syntax and build
+        run: |
+          python3 -m py_compile ops/copperside/updater.py
+          docker build -t cpa-updater:check -f ops/copperside/Dockerfile.updater ops/copperside
       - uses: actions/upload-artifact@v4
         with:
           name: cpa-linux-amd64-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
+      - name: Publish installable release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(cat ops/copperside/version)
+          gh release create "cpa-v${version}" --target "$GITHUB_SHA" \
+            --title "CPA ${version}" --generate-notes \
+            dist/cpa-update.json dist/cpa-image.tar.gz dist/checksums.txt dist/source-commit.txt

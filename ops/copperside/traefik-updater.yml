@@ -1,0 +1,14 @@
+http:
+  routers:
+    cpa-main-updater:
+      rule: Host(`cpa.copperside.ru`) && Path(`/v8/management/server/update`)
+      entryPoints: [websecure]
+      priority: 1500
+      middlewares: [claude-dev-tailnet]
+      service: cpa-main-updater
+      tls: {}
+  services:
+    cpa-main-updater:
+      loadBalancer:
+        servers:
+          - url: http://100.122.36.105:18319

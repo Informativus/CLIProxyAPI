@@ -1,0 +1,6 @@
+FROM python:3.12-alpine
+RUN apk add --no-cache docker-cli && pip install --no-cache-dir PyYAML==6.0.3 bcrypt==5.0.0
+WORKDIR /app
+COPY updater.py /app/updater.py
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENTRYPOINT ["python3", "/app/updater.py"]
