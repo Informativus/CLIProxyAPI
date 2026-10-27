@@ -120,9 +120,10 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 }
 
 type responsesWebsocketWriter struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	closing atomic.Bool
+	conn              *websocket.Conn
+	writeMu           sync.Mutex
+	closing           atomic.Bool
+	terminalResponses responsesWebsocketTerminalResponses
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {

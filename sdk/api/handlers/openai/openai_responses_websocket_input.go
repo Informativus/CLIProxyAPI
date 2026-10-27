@@ -19,6 +19,53 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// Keep terminal response identities on the downstream connection: HTTP turns
+// and upstream socket replacements do not retain them in the Codex executor.
+// Hashes bound memory independently of response ID length; the ring bounds it
+// independently of connection lifetime. No response content is retained.
+type responsesWebsocketTerminalResponses struct {
+	mu    sync.Mutex
+	ids   [256][sha256.Size]byte
+	count int
+	next  int
+}
+
+func (s *responsesWebsocketTerminalResponses) record(payload []byte) {
+	switch gjson.GetBytes(payload, "type").String() {
+	case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled":
+	default:
+		return
+	}
+	responseID := gjson.GetBytes(payload, "response.id")
+	if responseID.Type != gjson.String || strings.TrimSpace(responseID.String()) == "" {
+		return
+	}
+	id := sha256.Sum256([]byte(responseID.String()))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ids[s.next] = id
+	s.next = (s.next + 1) % len(s.ids)
+	if s.count < len(s.ids) {
+		s.count++
+	}
+}
+
+func (s *responsesWebsocketTerminalResponses) contains(payload []byte) bool {
+	responseID := gjson.GetBytes(payload, "response_id")
+	if responseID.Type != gjson.String || strings.TrimSpace(responseID.String()) == "" {
+		return false
+	}
+	id := sha256.Sum256([]byte(responseID.String()))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := 0; i < s.count; i++ {
+		if s.ids[i] == id {
+			return true
+		}
+	}
+	return false
+}
+
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
@@ -98,6 +145,13 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 			// response_id, mode, and extension fields must reach upstream unchanged.
 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
 				appendResponsesInterruptDiagnostic(timeline, payload, "")
+				// A late or duplicate interrupt is already satisfied. Check before
+				// forwarding so it cannot cancel a newer HTTP turn or reach a new
+				// upstream socket that no longer knows the completed response.
+				if writer != nil && writer.terminalResponses.contains(payload) {
+					appendResponsesInterruptDiagnostic(timeline, payload, "handled")
+					continue
+				}
 				errInterrupt := interrupt(payload)
 				switch {
 				case errInterrupt == nil:
