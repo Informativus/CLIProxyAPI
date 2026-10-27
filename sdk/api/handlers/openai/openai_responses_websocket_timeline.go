@@ -303,6 +303,9 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
 	if writer.closing.Load() {
 		return websocket.ErrCloseSent
 	}
+	// Publish terminal state before the frame can reach the client and trigger
+	// an interrupt on the independent reader. Do not hold its lock during I/O.
+	writer.terminalResponses.record(payload)
 	return writer.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
