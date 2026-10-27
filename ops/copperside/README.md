@@ -30,7 +30,7 @@ Build `Dockerfile.updater` from this directory into a versioned local image.
 Add an `updater` service to the **existing Dokploy raw Compose**, then deploy it
 through Dokploy. Do not edit the generated Docker Compose file. The service:
 
-- publishes only `100.122.36.105:18319:8319`;
+- publishes only `100.122.36.105:18321:8319`;
 - mounts `/var/run/docker.sock` (Docker control is needed to load/inspect images);
 - mounts `claude-dev-cli-proxy-data` read-only at `/cpa-data`;
 - mounts a private persistent volume at `/state`;
