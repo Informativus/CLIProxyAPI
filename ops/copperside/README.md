@@ -34,7 +34,7 @@ through Dokploy. Do not edit the generated Docker Compose file. The service:
 - mounts `/var/run/docker.sock` (Docker control is needed to load/inspect images);
 - mounts `claude-dev-cli-proxy-data` read-only at `/cpa-data`;
 - mounts a private persistent volume at `/state`;
-- mounts a mode-0600 JSON configuration at `/run/cpa-updater.json`, read-only;
+- mounts a root-owned mode-0600 JSON configuration at `/run/cpa-updater.json`, read-only;
 - has 256 MiB memory, one CPU, dropped capabilities and no-new-privileges;
 - uses `pull_policy: never` and restart unless-stopped.
 

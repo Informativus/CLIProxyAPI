@@ -6,6 +6,10 @@ from pathlib import Path
 
 archive = Path("dist/cpa-image.tar.gz")
 version = Path("ops/copperside/version").read_text().strip()
+digest = hashlib.sha256()
+with archive.open("rb") as stream:
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(block)
 manifest = {
     "schema": 1,
     "version": version,
@@ -14,7 +18,7 @@ manifest = {
     "image": os.environ["CPA_IMAGE"],
     "image_id": os.environ["CPA_IMAGE_ID"],
     "asset": archive.name,
-    "sha256": hashlib.file_digest(archive.open("rb"), "sha256").hexdigest(),
+    "sha256": digest.hexdigest(),
     "size": archive.stat().st_size,
 }
 Path("dist/cpa-update.json").write_text(json.dumps(manifest, indent=2) + "\n")
