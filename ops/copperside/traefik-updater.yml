@@ -11,4 +11,4 @@ http:
     cpa-main-updater:
       loadBalancer:
         servers:
-          - url: http://100.122.36.105:18319
+          - url: http://100.122.36.105:18321
