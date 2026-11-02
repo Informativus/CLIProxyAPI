@@ -1,0 +1,32 @@
+name: cpa-main-recovery
+services:
+  # Recover Copperside's main Codex proxy when its process stalls at the memory limit.
+  watchdog:
+    image: local/cpa-main-watchdog:${SOURCE_SHA:?Set merged source SHA}
+    pull_policy: never
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - recovery-state:/state
+      - updater-state:/updater-state:ro
+    labels:
+      io.server-atlas.purpose: "Recover the main Copperside CPA gateway for Codex clients after sustained unhealthy state or memory exhaustion; preserve credentials and the separate FD instance."
+      io.server-atlas.owner: "Copperside CPA"
+      io.server-atlas.source: "https://github.com/Informativus/CLIProxyAPI/tree/main/ops/copperside/watchdog"
+      org.opencontainers.image.revision: "${SOURCE_SHA}"
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+volumes:
+  recovery-state:
+  updater-state:
+    external: true
+    name: cpa-main-updater-state
