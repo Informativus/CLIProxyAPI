@@ -115,6 +115,15 @@ func recoverableFailureRetryAfterWithHint(now time.Time, retryAfter *time.Durati
 		return time.Time{}
 	}
 	if retryAfter != nil && *retryAfter > 0 {
+		// Copperside: the configured transient cooldown is a floor for upstream
+		// hints. Codex sends retry-after: 6 with server_is_overloaded; honouring it
+		// verbatim re-selects the overloaded credential every few seconds, so it
+		// never rests while the other credentials could carry the traffic.
+		if seconds > 0 {
+			if floor := time.Duration(seconds) * time.Second; *retryAfter < floor {
+				return now.Add(floor)
+			}
+		}
 		return now.Add(*retryAfter)
 	}
 	if seconds == 0 {
