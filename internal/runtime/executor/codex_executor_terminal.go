@@ -512,6 +512,13 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return true
 	}
+	// responsesapi.* frames (e.g. responsesapi.websocket_timing) are upstream transport telemetry that
+	// the upstream websocket sends before a server_is_overloaded rejection. They carry no generated
+	// output, and the SSE framer already drops them downstream. Releasing on them committed the
+	// stream, so the rejection reached the client instead of failing over to another credential.
+	if strings.HasPrefix(eventType, "responsesapi.") {
+		return true
+	}
 	switch eventType {
 	// response.metadata carries prompt-moderation flags, not generated output. Upstream now sends it
 	// between response.in_progress and a server_is_overloaded rejection, so releasing on it leaked

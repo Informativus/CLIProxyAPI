@@ -65,6 +65,22 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	}, true
 }
 
+// isCodexBootstrapFailoverWebsocketError reports whether an upstream websocket error frame that
+// arrives before any output is one another credential may serve: a capacity overload, rate
+// limiting, or an exhausted usage limit. The body is normalised first because the upstream may
+// nest the error under "body".
+func isCodexBootstrapFailoverWebsocketError(payload []byte) bool {
+	status := int(gjson.GetBytes(payload, "status").Int())
+	if status == 0 {
+		status = int(gjson.GetBytes(payload, "status_code").Int())
+	}
+	if status <= 0 {
+		return false
+	}
+	body := buildCodexWebsocketErrorPayload(payload, status)
+	return isCodexOverloadBootstrapFailure(body) || isCodexUsageLimitError(body)
+}
+
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {
 	status := int(gjson.GetBytes(payload, "status").Int())
 	if status == 0 {
