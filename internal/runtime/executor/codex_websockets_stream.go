@@ -358,8 +358,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				// An overload or usage-limit error frame inside the bootstrap window is retried on
+				// another credential, like the terminal-failure branch below, so the downstream
+				// websocket session must survive this upstream teardown. Notifying the disconnect
+				// here closed the client and cancelled the request before the conductor recorded
+				// the failure, so the client saw a dropped stream and the failing credential
+				// kept its session-affinity binding and no cooldown.
+				failoverPending := !timeoutReached && isCodexBootstrapFailoverWebsocketError(payload)
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					if failoverPending {
+						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
+					} else {
+						e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					}
 					sess.clearActive(conn, readCh)
 					unlockStreamSession()
 				} else {
@@ -377,6 +388,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					bootstrapTerminalErr = wsErr
 					break
+				}
+				if failoverPending {
+					if isEphemeralSession {
+						closeCodexWebsocketSession(sess, "bootstrap_overload")
+					}
+					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap retryable error frame after %d messages read, failing over", bufferedFrames)
 				}
 				return nil, wsErr
 			}
